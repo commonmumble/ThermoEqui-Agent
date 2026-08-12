@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from agent.graph_workflow import BoundedAgentGraph
+from agent.memory_integration import retrieve_for_calculation, retrieve_for_concept_qa, save_turn
 from agent.providers import LLMProvider, LLMProviderError, LLMProviderOutputError
 from agent.skill_integration import answer_with_skills
 from agent.tools import DEFAULT_TOOL_REGISTRY, EngineeringToolRegistry
@@ -539,9 +540,7 @@ def _build_calculation_summary(
 ) -> str:
     """从计算结果构造可读摘要，替代硬编码的"计算完成"。"""
     result = envelope.result
-    comps = " / ".join(c.name for c in components)
     parts: list[str] = [f"模型：{result.model_name}"]
-
 
     if result.temperature_K is not None:
         parts.append(f"T={result.temperature_K:.2f} K")
@@ -618,19 +617,25 @@ class ConversationOrchestrator:
             Intent.PROCESS_RECOMMENDATION,
             Intent.RESULT_INTERPRETATION,
         }:
-            strict = intent in {Intent.PARAMETER_QUERY, Intent.DATA_QUERY}   # 新增
+            # Retrieve conversation memory and inject as context prefix
+            memory_prefix = retrieve_for_concept_qa(conversation_id, message)
+            effective_message = f"{memory_prefix}{message}" if memory_prefix else message
+            strict = intent in {Intent.PARAMETER_QUERY, Intent.DATA_QUERY}
             try:
-                statements = await self.provider.answer_with_evidence(message, strict=strict)
+                statements = await self.provider.answer_with_evidence(effective_message, strict=strict)
             except (LLMProviderError, LLMProviderOutputError):
                 statements = []
             if not statements or statements[0].category == "Warning":
-                skill_statements = answer_with_skills(message, intent)
+                skill_statements = answer_with_skills(effective_message, intent)
                 if skill_statements:
                     statements = skill_statements
+            answer_text = "\n".join(item.text for item in statements)
+            # Save this turn to conversation memory
+            save_turn(conversation_id, message, answer_text, intent)
             return ChatResponse(
                 conversation_id=conversation_id,
                 intent=intent,
-                answer="\n".join(item.text for item in statements),
+                answer=answer_text,
                 statements=statements,
             )
         task = await self.provider.formulate_task(message, state.task)
@@ -658,12 +663,23 @@ class ConversationOrchestrator:
             )
         try:
             envelope, statements, execution_steps = await self.graph.run(message, task)
-            validation = envelope.validation
             state.run_ids.append(envelope.result.run_id)
+            answer_text = _build_calculation_summary(envelope, task.components)
+            # Append historical calculation reference if available
+            calc_ref = retrieve_for_calculation(conversation_id, message)
+            if calc_ref:
+                answer_text += calc_ref
+            # Save this turn to conversation memory
+            component_names = [c.name for c in task.components]
+            task_summary = f"{task.calculation_type}, {task.equilibrium_type}, {task.model_name or 'auto'}"
+            save_turn(
+                conversation_id, message, answer_text, intent,
+                components=component_names, task_summary=task_summary,
+            )
             return ChatResponse(
                 conversation_id=conversation_id,
                 intent=intent,
-                answer=_build_calculation_summary(envelope, task.components),
+                answer=answer_text,
                 statements=statements,
                 execution_steps=execution_steps,
                 task=task,
