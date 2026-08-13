@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from agent.conversation_memory import ConversationMemory, MemoryRecord
 from schemas.domain import Intent
@@ -34,6 +35,35 @@ def build_context_prefix(memories: list[MemoryRecord]) -> str:
     return "\n".join(lines)
 
 
+_NUMBER_IN_TEXT = re.compile(r"\d+(?:\.\d+)?")
+
+
+def extract_grounded_numbers(memories: list[MemoryRecord]) -> set[str]:
+    """Extract numeric tokens from memory answers that have been validated by thermo_engine.
+
+    These numbers are grounded in prior calculation results and can be safely
+    referenced by the LLM during concept/model-comparison Q&A.
+    """
+    grounded: set[str] = set()
+    for mem in memories:
+        if mem.task_summary:  # Calculation memories = validated by thermo_engine
+            for num in _NUMBER_IN_TEXT.findall(mem.answer):
+                grounded.add(num)
+    return grounded
+
+
+def retrieve_for_concept_qa(session_id: str, message: str) -> tuple[str, set[str]]:
+    """Retrieve memories for concept Q&A.
+
+    Returns (context_prefix, grounded_number_strings).
+    """
+    memory = get_memory()
+    memories = memory.retrieve(session_id, message, top_k=3)
+    prefix = build_context_prefix(memories)
+    grounded = extract_grounded_numbers(memories)
+    return prefix, grounded
+
+
 def build_calc_reference(memories: list[MemoryRecord]) -> str:
     """Build a reference suffix for calculation tasks citing prior results."""
     calc_memories = [m for m in memories if m.task_summary]
@@ -43,13 +73,6 @@ def build_calc_reference(memories: list[MemoryRecord]) -> str:
     for mem in calc_memories[:2]:
         lines.append(f"- 您之前问过「{mem.question}」：{mem.task_summary}")
     return "\n".join(lines)
-
-
-def retrieve_for_concept_qa(session_id: str, message: str) -> str:
-    """Retrieve memories and return context prefix for concept Q&A."""
-    memory = get_memory()
-    memories = memory.retrieve(session_id, message, top_k=3)
-    return build_context_prefix(memories)
 
 
 def retrieve_for_calculation(session_id: str, message: str) -> str:
