@@ -28,7 +28,10 @@ from thermo_engine.identity import (
     is_electrolyte_identity,
     resolve_literal_components,
 )
+from thermo_engine.parameter_store import load_production_parameter_sets
 from thermo_engine.units import pressure_to_kpa, temperature_to_kelvin
+
+_MODEL_ALLOWED_FOR_AUTO = {"Wilson", "NRTL", "UNIQUAC"}
 
 COMPONENT_PATTERNS = (
     ("benzene", "Benzene", "71-43-2", ("苯", "benzene")),
@@ -361,7 +364,22 @@ class ConversationState:
     last_envelope: CalculationEnvelope | None = None
 
 
-_CALCULATION_REQUEST_VERBS = ("计算", "算", "求", "calc", "compute", "simulate", "flash", "求算", "算出", "推算")
+_CALCULATION_REQUEST_VERBS = (
+    "计算",
+    "算",
+    "求",
+    "判断",
+    "搜索",
+    "calc",
+    "compute",
+    "simulate",
+    "classify",
+    "search",
+    "flash",
+    "求算",
+    "算出",
+    "推算",
+)
 _NON_REQUEST_CALCULATION_PREFIXES = (
     "经计算",
     "通过计算",
@@ -405,6 +423,9 @@ _CONCEPT_QUESTION_WORDS_IN_CALC = (
 )
 
 
+_CALCULATION_SEARCH_VERBS = ("搜索", "查找")
+
+
 def _is_active_calculation_request(message: str) -> bool:
     """Detect active calculation requests vs passive descriptions or judgment questions.
 
@@ -434,6 +455,8 @@ def _is_active_calculation_request(message: str) -> bool:
         if pattern.search(message):
             return False
     if any(verb.casefold() in lower for verb in _CALCULATION_REQUEST_VERBS):
+        return True
+    if any(verb.casefold() in lower for verb in _CALCULATION_SEARCH_VERBS):
         return True
     return False
 
@@ -659,6 +682,10 @@ class DeterministicProvider:
             and (pressure is not None or temperature is not None or component_list)
         )
         if previous and (is_explicit_continuation or is_implicit_continuation):
+            updated_components = component_list or previous.components
+            components_changed = {
+                component.cas_number or component.component_id for component in updated_components
+            } != {component.cas_number or component.component_id for component in previous.components}
             updates = {
                 "task_id": str(uuid4()),
                 "conditions": previous.conditions.model_copy(
@@ -669,6 +696,7 @@ class DeterministicProvider:
                 ),
                 "assumptions": [*previous.assumptions],
                 "original_question": message,
+                "model_name": None if components_changed else previous.model_name,
             }
             if pressure_assumption and pressure_assumption not in updates["assumptions"]:
                 updates["assumptions"].append(pressure_assumption)
@@ -678,7 +706,9 @@ class DeterministicProvider:
         if not component_list:
             return None
         calculation_type = self._calculation_type(lower)
-        equilibrium_type = "FLASH" if calculation_type == "tp_flash" else "LLE" if calculation_type == "lle" else "VLE"
+        equilibrium_type = "FLASH" if calculation_type in {"tp_flash", "phase_stability"} else "LLE"
+        if calculation_type not in {"tp_flash", "phase_stability", "lle"}:
+            equilibrium_type = "VLE"
         assumptions = [pressure_assumption] if pressure_assumption else []
         conditions = ThermodynamicConditions(temperature_K=temperature, pressure_kPa=pressure)
         return TaskManifest(
@@ -762,6 +792,8 @@ class DeterministicProvider:
 
     @staticmethod
     def _calculation_type(lower: str) -> str:
+        if "相态" in lower or "phase classification" in lower or "phase state" in lower:
+            return "phase_stability"
         if "lle" in lower or "液液" in lower or "liquid-liquid" in lower:
             return "lle"
         if "p-x-y" in lower or "pxy" in lower or "等温" in lower:
@@ -961,7 +993,14 @@ class ConversationOrchestrator:
                     intent_label=intent.value,
                 )
             except (LLMProviderError, LLMProviderOutputError):
-                statements = []
+                statements = answer_with_skills(effective_message, intent)
+                if not statements:
+                    statements = [
+                        EvidenceStatement(
+                            category="Warning",
+                            text="外部模型暂时不可用；请稍后重试或改用确定性计算接口。",
+                        )
+                    ]
             if not statements or statements[0].category == "Warning":
                 skill_statements = answer_with_skills(effective_message, intent)
                 if skill_statements:
@@ -1008,6 +1047,11 @@ class ConversationOrchestrator:
             previous_task=state.task if intent == Intent.TASK_CORRECTION else None,
         )
         state.task = task
+        # Auto-populate parameters from production YAML when task has no explicit parameter_sets
+        auto_params = self._auto_lookup_parameters(task)
+        if auto_params:
+            task = self._merge_parameter_sets(task, auto_params)
+            state.task = task
         # Try to infer missing temperature from previous calculation results
         if task.conditions.temperature_K is None:
             inferred_temp = self._infer_temperature_from_context(message, task, state.last_envelope)
@@ -1082,7 +1126,7 @@ class ConversationOrchestrator:
             return deterministic_intent
         try:
             provider_intent = await self.provider.classify_intent(message)
-        except LLMProviderOutputError:
+        except (LLMProviderError, LLMProviderOutputError):
             return deterministic_intent
         if (
             provider_intent == Intent.EQUILIBRIUM_CALCULATION
@@ -1097,7 +1141,10 @@ class ConversationOrchestrator:
         ):
             return deterministic_intent
 
-        if deterministic_intent == Intent.MODEL_SELECTION_QA and provider_intent == Intent.EQUILIBRIUM_CALCULATION:
+        if deterministic_intent == Intent.MODEL_SELECTION_QA and provider_intent in {
+            Intent.EQUILIBRIUM_CALCULATION,
+            Intent.CONCEPT_QA,
+        }:
             return deterministic_intent
         # Specialized intents require explicit trigger keywords; if the deterministic
         # classifier did not fire them and the LLM hallucinated one, defer to
@@ -1178,6 +1225,36 @@ class ConversationOrchestrator:
                 update={"conditions": ThermodynamicConditions.model_validate(condition_data)}
             )
         return grounded.model_copy(update={"original_question": message})
+
+    @staticmethod
+    def _auto_lookup_parameters(
+        task: TaskManifest,
+    ) -> list[ParameterSet]:
+        """Auto-populate parameters from production YAML when task has no explicit parameter_sets.
+
+        Supports Wilson, NRTL, and UNIQUAC models for binary systems.
+        Matches by component name (case-insensitive) in forward or reverse order.
+        Returns a list of ParameterSet objects (empty if no match found).
+        """
+        model_name = task.model_name
+        if not model_name or model_name not in _MODEL_ALLOWED_FOR_AUTO:
+            return []
+        if len(task.components) != 2:
+            return []
+        if task.parameters:
+            return []
+        component_names = [c.name.casefold() for c in task.components]
+        try:
+            all_production_sets = load_production_parameter_sets()
+        except Exception:
+            return []
+        for param_set in all_production_sets:
+            if param_set.model_name.casefold() != model_name.casefold():
+                continue
+            order_lower = [c.casefold() for c in param_set.component_order]
+            if order_lower == component_names or list(reversed(order_lower)) == component_names:
+                return [param_set]
+        return []
 
     @staticmethod
     def _align_task_components(
@@ -1290,6 +1367,13 @@ class ConversationOrchestrator:
             missing.append("pressure_kPa")
         if task.calculation_type in {"isothermal_vle", "tp_flash"} and task.conditions.temperature_K is None:
             missing.append("temperature_K")
+        if task.calculation_type == "phase_stability":
+            if task.conditions.temperature_K is None:
+                missing.append("temperature_K")
+            if task.conditions.pressure_kPa is None:
+                missing.append("pressure_kPa")
+            if task.conditions.feed_composition is None:
+                missing.append("feed_composition")
         if task.calculation_type == "tp_flash" and task.conditions.feed_composition is None:
             missing.append("feed_composition")
         if task.calculation_type == "bubble_point" and task.conditions.liquid_composition is None:
