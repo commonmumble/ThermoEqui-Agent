@@ -181,8 +181,10 @@ def resolve_external_component(identifier: str) -> ComponentIdentity | None:
         return None
     cas_number = str(constants.CASs[0])
     name = str(constants.names[0]).title()
+    is_cas_format = bool(re.match(r"^\d+-\d+-\d+$", identifier))
+    component_id = identifier if not is_cas_format else cas_number
     return ComponentIdentity(
-        component_id=cas_number,
+        component_id=component_id,
         name=name,
         cas_number=cas_number,
         aliases=[identifier],
