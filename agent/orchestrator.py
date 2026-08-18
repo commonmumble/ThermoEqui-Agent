@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 
 from agent.graph_workflow import BoundedAgentGraph
+from agent.memory_integration import retrieve_for_calculation, retrieve_for_concept_qa, save_turn
 from agent.providers import LLMProvider, LLMProviderError, LLMProviderOutputError
 from agent.skill_integration import answer_with_skills
 from agent.tools import DEFAULT_TOOL_REGISTRY, EngineeringToolRegistry
@@ -27,7 +28,10 @@ from thermo_engine.identity import (
     is_electrolyte_identity,
     resolve_literal_components,
 )
+from thermo_engine.parameter_store import load_production_parameter_sets
 from thermo_engine.units import pressure_to_kpa, temperature_to_kelvin
+
+_MODEL_ALLOWED_FOR_AUTO = {"Wilson", "NRTL", "UNIQUAC"}
 
 COMPONENT_PATTERNS = (
     ("benzene", "Benzene", "71-43-2", ("苯", "benzene")),
@@ -205,6 +209,47 @@ def _explicit_composition(message: str) -> list[float] | None:
     return [float(value) for value in re.findall(_NUMBER_PATTERN, match.group("values"), flags=re.IGNORECASE)]
 
 
+_PARTIAL_COMPOSITION_PATTERN = re.compile(
+    (
+        r"(?:液相|气相|进料|feed|liquid|vapor)\s*组成为?\s*"
+        r"(?P<value>\d+(?:\.\d*)?|\.\d+)"
+    ),
+    re.IGNORECASE,
+)
+
+
+def _partial_composition(message: str) -> list[float] | None:
+    """Extract composition values when a user specifies e.g. 'x1=0.35' or '液相组成为0.35'."""
+    explicit = _explicit_composition(message)
+    if explicit is not None:
+        return explicit
+    matches = re.findall(r"组成为?\s*(\d+(?:\.\d*)?|\.\d+)", message, re.IGNORECASE)
+    if matches:
+        values = [float(v) for v in matches]
+        if values and all(0 <= v <= 1 for v in values) and sum(values) <= 1 + 1e-8:
+            return values
+    x_pattern = re.findall(r"x[₀-₉0-9]*\s*[=＝]\s*(\d+(?:\.\d*)?|\.\d+)", message, re.IGNORECASE)
+    if x_pattern:
+        values = [float(v) for v in x_pattern]
+        if values and all(0 <= v <= 1 for v in values):
+            return values
+    return None
+
+
+def _extract_composition_values(message: str) -> list[float]:
+    """Extract any 0-1 range numbers that look like composition values."""
+    values = _partial_composition(message)
+    if values is not None:
+        return values
+    numbers = re.findall(r"\d+(?:\.\d*)?|\.\d+", message)
+    compo = []
+    for n in numbers:
+        v = float(n)
+        if 0.0 <= v <= 1.0 and v not in (0.0, 1.0):
+            compo.append(v)
+    return compo
+
+
 def _is_model_comparison_question(message: str) -> bool:
     lower = message.casefold()
     return any(marker in lower for marker in _MODEL_COMPARISON_MARKERS) and any(
@@ -330,16 +375,29 @@ def _has_positive_scope_marker(message: str, markers: tuple[str, ...]) -> bool:
 class ConversationState:
     task: TaskManifest | None = None
     run_ids: list[str] = field(default_factory=list)
+    last_envelope: CalculationEnvelope | None = None
 
 
-_CALCULATION_REQUEST_VERBS = ("计算", "算", "求", "calc", "compute", "simulate", "flash", "求算", "算出", "推算")
+_CALCULATION_REQUEST_VERBS = (
+    "计算",
+    "算",
+    "求",
+    "判断",
+    "搜索",
+    "calc",
+    "compute",
+    "simulate",
+    "classify",
+    "search",
+    "flash",
+    "求算",
+    "算出",
+    "推算",
+)
 _NON_REQUEST_CALCULATION_PREFIXES = (
-    "模型计算",
-    "方程计算",
     "经计算",
     "通过计算",
     "由计算",
-    "用计算",
     "计算得到",
     "计算得出",
     "计算结果",
@@ -348,6 +406,34 @@ _NON_REQUEST_CALCULATION_PREFIXES = (
     "经过计算",
     "理论计算",
     "模拟计算",
+)
+# Passive calculation prefixes that indicate reporting rather than requesting
+_NON_REQUEST_PASSIVE_PATTERNS = (
+    re.compile(r"模型(?:计算|方程计算).*(?:得到|得出|结果|显示|表明|给出)"),
+    re.compile(r"方程计算.*(?:得到|得出|结果|显示|表明)"),
+    re.compile(r"用(?:计算|模型|方程)(?:得到|得出|结果|显示|表明)"),
+)
+
+
+_CONCEPT_QUESTION_WORDS_IN_CALC = (
+    "多少",
+    "为什么",
+    "怎么",
+    "怎样",
+    "为何",
+    "区别",
+    "差异",
+    "对比",
+    "比较",
+    "不同",
+    "不一样",
+    "原因",
+    "解释",
+    "分析",
+    "合理",
+    "对不对",
+    "正确",
+    "不对",
 )
 
 #: Property keywords whose value can only come from a deterministic backend.
@@ -390,19 +476,37 @@ _CALCULATION_SEARCH_VERBS = ("搜索", "查找")
 
 
 def _is_active_calculation_request(message: str) -> bool:
-    """Detect active calculation requests vs passive descriptions of calculations.
+    """Detect active calculation requests vs passive descriptions or judgment questions.
 
     Active: "计算苯-甲苯气液平衡", "帮我求算", "calc the VLE",
             "乙醇在水中的无限稀释活度系数是多少" (gamma-infinity value questions
             and thermo "how much" questions are routed to deterministic calculation)
     Passive: "模型计算得到", "经计算表明", "计算结果显示"
+    Judgment: "可以用拉乌尔定律计算吗", "该体系能用NRTL计算吗"
     """
     lower = message.casefold()
+    # Judgment questions: "...可以/能/应该/是否 ...计算吗/适用吗/可行吗" → not a request to run
+    if re.search(
+        r"(?:可以|能|应该|是否|适不适合|合不合适|能不能|可不可以).*(?:计算|适用|可行|使用|采用).*(?:吗|呢|？|\?)", lower
+    ):
+        return False
+    # If the message asks whether a MODEL is suitable/applicable → concept/model-selection, not calculation
+    if re.search(r"(?:可以用|能用|适用|合适|应该选|应该用|选什么).*(?:定律|模型|方程|方法)", lower) and (
+        "吗" in lower or "呢" in lower or "?" in lower or "？" in lower
+    ):
+        return False
+    # If the message is a concept question about existing results (contains concept-question words),
+    # treat it as concept/interpretation, not a request to run a calculation.
+    if any(word in lower for word in _CONCEPT_QUESTION_WORDS_IN_CALC):
+        return False
     for prefix in _NON_REQUEST_CALCULATION_PREFIXES:
         if prefix.casefold() in lower:
             return False
     if any(keyword in lower for keyword in _GAMMA_INFINITY_KEYWORDS):
         return True
+    for pattern in _NON_REQUEST_PASSIVE_PATTERNS:
+        if pattern.search(message):
+            return False
     if any(verb.casefold() in lower for verb in _CALCULATION_REQUEST_VERBS):
         return True
     if any(verb.casefold() in lower for verb in _CALCULATION_SEARCH_VERBS):
@@ -464,7 +568,74 @@ class DeterministicProvider:
         )
         if _has_positive_scope_marker(lower, excluded_markers) or resolved_electrolyte:
             return Intent.UNSUPPORTED_TASK
-        if any(word in lower for word in ("改为", "改成", "再算", "change", "rerun")):
+        _TASK_CORRECTION_STRONG = (
+            "改为",
+            "改成",
+            "换成",
+            "再算",
+            "change",
+            "rerun",
+            "沿用",
+            "同样条件",
+            "一样条件",
+            "以上条件",
+            "上面条件",
+            "前面的条件",
+            "之前的条件",
+            "用同样的",
+            "按之前的",
+            "照之前的",
+            "仍用",
+            "仍然用",
+            "保持",
+            "同样的条件",
+            "一样的条件",
+        )
+        _TASK_CORRECTION_WEAK = (
+            "同样",
+            "一样",
+            "刚才",
+            "前面的",
+            "之前的",
+            "上次的",
+            "上面的",
+            "刚才我们",
+            "刚才我",
+            "之前我们",
+            "之前我",
+        )
+        if any(word in lower for word in _TASK_CORRECTION_STRONG):
+            return Intent.TASK_CORRECTION
+        weak_hit = any(word in lower for word in _TASK_CORRECTION_WEAK)
+        _CONCEPT_COMPARE_WORDS = (
+            "多少",
+            "为什么",
+            "对比",
+            "比较",
+            "差值",
+            "差了",
+            "差异",
+            "原因",
+            "合理",
+            "趋势",
+            "区别",
+            "联系",
+            "特点",
+            "特征",
+            "分析",
+            "解释",
+            "原理",
+            "影响",
+            "结论",
+            "对不对",
+            "正确",
+            "不对",
+            "不一样",
+            "相同吗",
+            "一致吗",
+        )
+        concept_hit = any(word in lower for word in _CONCEPT_COMPARE_WORDS)
+        if weak_hit and not concept_hit:
             return Intent.TASK_CORRECTION
         if any(word in lower for word in ("解释结果", "结果含义", "interpret result")):
             return Intent.RESULT_INTERPRETATION
@@ -494,29 +665,107 @@ class DeterministicProvider:
         component_list = _requested_components(message)
         pressure, pressure_assumption = self._pressure(message)
         temperature = self._temperature(message)
-        if previous and any(word in lower for word in ("改为", "改成", "再算", "change", "rerun")):
-            conditions = previous.conditions.model_copy(
-                update={
-                    **({"pressure_kPa": pressure} if pressure is not None else {}),
-                    **({"temperature_K": temperature} if temperature is not None else {}),
-                }
-            )
-            assumptions = [*previous.assumptions]
-            if pressure_assumption and pressure_assumption not in assumptions:
-                assumptions.append(pressure_assumption)
+        _CORRECTION_OR_CONTINUATION_STRONG = (
+            "改为",
+            "改成",
+            "换成",
+            "再算",
+            "change",
+            "rerun",
+            "沿用",
+            "同样条件",
+            "一样条件",
+            "以上条件",
+            "上面条件",
+            "前面的条件",
+            "之前的条件",
+            "用同样的",
+            "按之前的",
+            "照之前的",
+            "仍用",
+            "仍然用",
+            "保持",
+            "同样的条件",
+            "一样的条件",
+        )
+        _CORRECTION_OR_CONTINUATION_WEAK = (
+            "同样",
+            "一样",
+            "刚才",
+            "前面的",
+            "之前的",
+            "上次的",
+            "上面的",
+            "刚才我们",
+            "刚才我",
+            "之前我们",
+            "之前我",
+        )
+        _CONCEPT_COMPARE_WORDS = (
+            "多少",
+            "为什么",
+            "对比",
+            "比较",
+            "差值",
+            "差了",
+            "差异",
+            "原因",
+            "合理",
+            "趋势",
+            "区别",
+            "联系",
+            "特点",
+            "特征",
+            "分析",
+            "解释",
+            "原理",
+            "影响",
+            "结论",
+            "对不对",
+            "正确",
+            "不对",
+            "不一样",
+            "相同吗",
+            "一致吗",
+        )
+        has_strong_marker = any(word in lower for word in _CORRECTION_OR_CONTINUATION_STRONG)
+        has_weak_marker = any(word in lower for word in _CORRECTION_OR_CONTINUATION_WEAK)
+        has_concept = any(word in lower for word in _CONCEPT_COMPARE_WORDS)
+        is_explicit_continuation = has_strong_marker or (has_weak_marker and not has_concept)
+        composition_values = _extract_composition_values(message)
+        is_implicit_continuation = (
+            previous is not None
+            and len(composition_values) >= 1
+            and (pressure is not None or temperature is not None or component_list)
+        )
+        if previous and (is_explicit_continuation or is_implicit_continuation):
+            updated_components = component_list or previous.components
+            components_changed = {
+                component.cas_number or component.component_id for component in updated_components
+            } != {component.cas_number or component.component_id for component in previous.components}
             updates = {
                 "task_id": str(uuid4()),
-                "conditions": conditions,
-                "assumptions": assumptions,
+                "conditions": previous.conditions.model_copy(
+                    update={
+                        **({"pressure_kPa": pressure} if pressure is not None else {}),
+                        **({"temperature_K": temperature} if temperature is not None else {}),
+                    }
+                ),
+                "assumptions": [*previous.assumptions],
                 "original_question": message,
+                "model_name": None if components_changed else previous.model_name,
             }
+            if pressure_assumption and pressure_assumption not in updates["assumptions"]:
+                updates["assumptions"].append(pressure_assumption)
             if component_list:
                 updates["components"] = component_list
             return previous.model_copy(update=updates)
         if not component_list:
             return None
         calculation_type = self._calculation_type(lower)
-        equilibrium_type = "FLASH" if calculation_type == "tp_flash" else "LLE" if calculation_type == "lle" else "VLE"
+        equilibrium_type = "FLASH" if calculation_type in {"tp_flash", "phase_stability"} else "LLE"
+        if calculation_type not in {"tp_flash", "phase_stability", "lle"}:
+            equilibrium_type = "VLE"
         assumptions = [pressure_assumption] if pressure_assumption else []
         conditions = ThermodynamicConditions(temperature_K=temperature, pressure_kPa=pressure)
         return TaskManifest(
@@ -534,7 +783,15 @@ class DeterministicProvider:
             original_question=message,
         )
 
-    async def answer_with_evidence(self, message: str, strict: bool = False) -> list[EvidenceStatement]:
+    async def answer_with_evidence(
+        self,
+        message: str,
+        strict: bool = False,
+        grounded_numbers: set[str] | None = None,
+        *,
+        intent_label: str | None = None,
+    ) -> list[EvidenceStatement]:
+        del strict, grounded_numbers, intent_label
         if "nrtl" in message.casefold() and ("peng" in message.casefold() or "pr" in message.casefold()):
             text = (
                 "NRTL 是液相活度系数模型，适合低到中压下的非理想液相 VLE/LLE，通常需要有来源的二元交互参数；"
@@ -592,6 +849,8 @@ class DeterministicProvider:
 
     @staticmethod
     def _calculation_type(lower: str) -> str:
+        if "相态" in lower or "phase classification" in lower or "phase state" in lower:
+            return "phase_stability"
         if "lle" in lower or "液液" in lower or "liquid-liquid" in lower:
             return "lle"
         if (
@@ -671,6 +930,47 @@ class ConversationOrchestrator:
     ) -> tuple[Intent, TaskManifest | None]:
         intent = await self._classify_intent(message)
         state = self.states.get(conversation_id or "")
+        if intent == Intent.EQUILIBRIUM_CALCULATION and state is not None and state.task is not None:
+            composition_values = _extract_composition_values(message)
+            if composition_values and len(composition_values) >= 1:
+                lower = message.casefold()
+                _CONCEPT_COMPARE_WORDS = (
+                    "多少",
+                    "为什么",
+                    "对比",
+                    "比较",
+                    "差值",
+                    "差了",
+                    "差异",
+                    "原因",
+                    "合理",
+                    "趋势",
+                    "区别",
+                    "联系",
+                    "特点",
+                    "特征",
+                    "分析",
+                    "解释",
+                    "原理",
+                    "影响",
+                    "结论",
+                    "对不对",
+                    "正确",
+                    "不对",
+                    "不一样",
+                    "相同吗",
+                    "一致吗",
+                )
+                has_concept = any(word in lower for word in _CONCEPT_COMPARE_WORDS)
+                if has_concept:
+                    pass
+                else:
+                    has_context_ref = any(
+                        word in lower for word in ("刚才", "之前", "前面", "上次", "仍用", "仍然", "保持", "现在")
+                    )
+                    has_no_new_components = not _requested_components(message)
+                    if has_context_ref or has_no_new_components:
+                        intent = Intent.TASK_CORRECTION
         task = await self.provider.formulate_task(message, state.task if state else None)
         if task is not None:
             if parameter_sets:
@@ -691,6 +991,39 @@ class ConversationOrchestrator:
         conversation_id = conversation_id or str(uuid4())
         state = self.states.setdefault(conversation_id, ConversationState())
         intent = await self._classify_intent(message)
+        if intent == Intent.EQUILIBRIUM_CALCULATION and state.task is not None:
+            composition_values = _extract_composition_values(message)
+            if composition_values and len(composition_values) >= 1:
+                lower = message.casefold()
+                _CONCEPT_COMPARE_WORDS = (
+                    "多少",
+                    "为什么",
+                    "对比",
+                    "比较",
+                    "差值",
+                    "差了",
+                    "差异",
+                    "原因",
+                    "合理",
+                    "趋势",
+                    "区别",
+                    "联系",
+                    "特点",
+                    "特征",
+                    "分析",
+                    "解释",
+                    "原理",
+                    "影响",
+                    "结论",
+                )
+                has_concept = any(word in lower for word in _CONCEPT_COMPARE_WORDS)
+                if not has_concept:
+                    has_context_ref = any(
+                        word in lower for word in ("刚才", "之前", "前面", "上次", "仍用", "仍然", "保持", "现在")
+                    )
+                    has_no_new_components = not _requested_components(message)
+                    if has_context_ref or has_no_new_components:
+                        intent = Intent.TASK_CORRECTION
         if intent == Intent.UNSUPPORTED_TASK:
             return ChatResponse(
                 conversation_id=conversation_id,
@@ -716,11 +1049,19 @@ class ConversationOrchestrator:
             Intent.PROCESS_RECOMMENDATION,
             Intent.RESULT_INTERPRETATION,
         }:
-            strict = intent in {Intent.PARAMETER_QUERY, Intent.DATA_QUERY}  # 新增
+            # Retrieve conversation memory and inject as context prefix
+            memory_prefix, grounded_numbers = retrieve_for_concept_qa(conversation_id, message)
+            effective_message = f"{memory_prefix}{message}" if memory_prefix else message
+            strict = intent in {Intent.PARAMETER_QUERY, Intent.DATA_QUERY}
             try:
-                statements = await self.provider.answer_with_evidence(message, strict=strict)
+                statements = await self.provider.answer_with_evidence(
+                    effective_message,
+                    strict=strict,
+                    grounded_numbers=grounded_numbers,
+                    intent_label=intent.value,
+                )
             except (LLMProviderError, LLMProviderOutputError):
-                statements = answer_with_skills(message, intent)
+                statements = answer_with_skills(effective_message, intent)
                 if not statements:
                     statements = [
                         EvidenceStatement(
@@ -729,29 +1070,36 @@ class ConversationOrchestrator:
                         )
                     ]
             if not statements or statements[0].category == "Warning":
-                skill_statements = answer_with_skills(message, intent)
+                skill_statements = answer_with_skills(effective_message, intent)
                 if skill_statements:
                     statements = skill_statements
+            answer_text = "\n".join(item.text for item in statements)
+            # Save this turn to conversation memory
+            save_turn(conversation_id, message, answer_text, intent)
             return ChatResponse(
                 conversation_id=conversation_id,
                 intent=intent,
-                answer="\n".join(item.text for item in statements),
+                answer=answer_text,
                 statements=statements,
             )
+        task = None
         try:
             task = await self.provider.formulate_task(message, state.task)
-        except (LLMProviderError, LLMProviderOutputError) as error:
-            return ChatResponse(
-                conversation_id=conversation_id,
-                intent=intent,
-                answer=str(error),
-                statements=[
-                    EvidenceStatement(
-                        category="Warning",
-                        text="外部模型暂时不可用；请稍后重试或改用确定性计算接口。",
-                    )
-                ],
-            )
+        except (LLMProviderError, LLMProviderOutputError, ValueError) as error:
+            if state.task:
+                try:
+                    task = await DeterministicProvider().formulate_task(message, state.task)
+                except Exception:
+                    task = None
+            if task is None:
+                return ChatResponse(
+                    conversation_id=conversation_id,
+                    intent=intent,
+                    answer=f"已识别计算意图，但未能构建结构化任务：{error}",
+                    statements=[
+                        EvidenceStatement(category="Warning", text="请补充明确的组分、条件或沿用之前的有效计算任务。")
+                    ],
+                )
         if task is None:
             return ChatResponse(
                 conversation_id=conversation_id,
@@ -767,14 +1115,27 @@ class ConversationOrchestrator:
                 task,
                 previous_task=state.task if intent == Intent.TASK_CORRECTION else None,
             )
-        except LLMProviderOutputError as error:
+        except (LLMProviderOutputError, ValueError) as error:
             return ChatResponse(
                 conversation_id=conversation_id,
                 intent=intent,
-                answer=str(error),
+                answer=f"已识别计算意图，但未能构建结构化任务：{error}",
                 statements=[EvidenceStatement(category="Warning", text="请明确组分与条件后重试。")],
             )
         state.task = task
+        # Auto-populate parameters from production YAML when task has no explicit parameter_sets
+        auto_params = self._auto_lookup_parameters(task)
+        if auto_params:
+            task = self._merge_parameter_sets(task, auto_params)
+            state.task = task
+        # Try to infer missing temperature from previous calculation results
+        if task.conditions.temperature_K is None:
+            inferred_temp = self._infer_temperature_from_context(message, task, state.last_envelope)
+            if inferred_temp is not None:
+                task = task.model_copy(
+                    update={"conditions": task.conditions.model_copy(update={"temperature_K": inferred_temp})}
+                )
+                state.task = task
         required_missing = self._missing_conditions(task)
         if required_missing:
             return ChatResponse(
@@ -787,10 +1148,27 @@ class ConversationOrchestrator:
         try:
             envelope, statements, execution_steps = await self.graph.run(message, task)
             state.run_ids.append(envelope.result.run_id)
+            state.last_envelope = envelope
+            answer_text = _build_calculation_summary(envelope, task.components)
+            # Append historical calculation reference if available
+            calc_ref = retrieve_for_calculation(conversation_id, message)
+            if calc_ref:
+                answer_text += calc_ref
+            # Save this turn to conversation memory
+            component_names = [c.name for c in task.components]
+            task_summary = f"{task.calculation_type}, {task.equilibrium_type}, {task.model_name or 'auto'}"
+            save_turn(
+                conversation_id,
+                message,
+                answer_text,
+                intent,
+                components=component_names,
+                task_summary=task_summary,
+            )
             return ChatResponse(
                 conversation_id=conversation_id,
                 intent=intent,
-                answer=_build_calculation_summary(envelope, task.components),
+                answer=answer_text,
                 statements=statements,
                 execution_steps=execution_steps,
                 task=task,
@@ -839,7 +1217,26 @@ class ConversationOrchestrator:
         ):
             return deterministic_intent
 
-        if deterministic_intent == Intent.MODEL_SELECTION_QA and provider_intent == Intent.EQUILIBRIUM_CALCULATION:
+        if deterministic_intent == Intent.MODEL_SELECTION_QA and provider_intent in {
+            Intent.EQUILIBRIUM_CALCULATION,
+            Intent.CONCEPT_QA,
+        }:
+            return deterministic_intent
+        # Specialized intents require explicit trigger keywords; if the deterministic
+        # classifier did not fire them and the LLM hallucinated one, defer to
+        # deterministic for concept/compare/interpretation flows.
+        _SPECIALIZED_INTENTS_REQUIRING_TRIGGER = {
+            Intent.SENSITIVITY_ANALYSIS,
+            Intent.PROCESS_RECOMMENDATION,
+            Intent.RESULT_INTERPRETATION,
+            Intent.DATA_QUERY,
+            Intent.PARAMETER_QUERY,
+        }
+        if (
+            provider_intent in _SPECIALIZED_INTENTS_REQUIRING_TRIGGER
+            and deterministic_intent not in _SPECIALIZED_INTENTS_REQUIRING_TRIGGER
+            and deterministic_intent != Intent.UNSUPPORTED_TASK
+        ):
             return deterministic_intent
         if provider_intent == Intent.UNSUPPORTED_TASK and deterministic_intent in {
             Intent.CONCEPT_QA,
@@ -884,6 +1281,12 @@ class ConversationOrchestrator:
             raise LLMProviderOutputError("No component identity could be resolved independently from the user message.")
         grounded = cls._align_task_components(task, expected_components)
         explicit_composition = _explicit_composition(message)
+        if explicit_composition is None:
+            partial_composition = _partial_composition(message)
+            if partial_composition is not None and len(partial_composition) < len(grounded.components):
+                n = len(grounded.components)
+                if len(partial_composition) == 1 and n == 2:
+                    explicit_composition = [partial_composition[0], 1.0 - partial_composition[0]]
         composition_field = {
             "tp_flash": "feed_composition",
             "bubble_point": "liquid_composition",
@@ -898,6 +1301,36 @@ class ConversationOrchestrator:
                 update={"conditions": ThermodynamicConditions.model_validate(condition_data)}
             )
         return grounded.model_copy(update={"original_question": message})
+
+    @staticmethod
+    def _auto_lookup_parameters(
+        task: TaskManifest,
+    ) -> list[ParameterSet]:
+        """Auto-populate parameters from production YAML when task has no explicit parameter_sets.
+
+        Supports Wilson, NRTL, and UNIQUAC models for binary systems.
+        Matches by component name (case-insensitive) in forward or reverse order.
+        Returns a list of ParameterSet objects (empty if no match found).
+        """
+        model_name = task.model_name
+        if not model_name or model_name not in _MODEL_ALLOWED_FOR_AUTO:
+            return []
+        if len(task.components) != 2:
+            return []
+        if task.parameters:
+            return []
+        component_names = [c.name.casefold() for c in task.components]
+        try:
+            all_production_sets = load_production_parameter_sets()
+        except Exception:
+            return []
+        for param_set in all_production_sets:
+            if param_set.model_name.casefold() != model_name.casefold():
+                continue
+            order_lower = [c.casefold() for c in param_set.component_order]
+            if order_lower == component_names or list(reversed(order_lower)) == component_names:
+                return [param_set]
+        return []
 
     @staticmethod
     def _align_task_components(
@@ -959,6 +1392,48 @@ class ConversationOrchestrator:
         )
 
     @staticmethod
+    def _infer_temperature_from_context(
+        message: str,
+        task: TaskManifest,
+        last_envelope: CalculationEnvelope | None,
+    ) -> float | None:
+        """Infer a missing temperature from the previous calculation result.
+
+        When the user says e.g. "在x1=0.3的温度下进行闪蒸" without an explicit
+        temperature value, look up the previously calculated temperature for
+        that composition from the last envelope.
+        """
+        if last_envelope is None:
+            return None
+        result = last_envelope.result
+        if result.temperature_K is None and not result.points:
+            return None
+        # If the message references a specific composition, try to match a point
+        composition_values = _extract_composition_values(message)
+        if composition_values:
+            ref_comp = composition_values[0]
+            # Look through equilibrium points for a matching liquid composition
+            for point in result.points:
+                if point.liquid_composition and len(point.liquid_composition) > 0:
+                    if abs(point.liquid_composition[0] - ref_comp) < 1e-6:
+                        return point.temperature_K
+            # If no points matched but result has a single temperature, check
+            # if the reference composition matches the task's liquid_composition
+            if result.temperature_K is not None:
+                task_liq = task.conditions.liquid_composition
+                if task_liq and len(task_liq) > 0 and abs(task_liq[0] - ref_comp) < 1e-6:
+                    return result.temperature_K
+        # No composition reference, but the message clearly implies using
+        # the previous result's temperature (e.g. "在该温度下", "在上述温度下")
+        lower = message.casefold()
+        if any(phrase in lower for phrase in ("该温度", "上述温度", "刚才的温度", "之前的温度", "那个温度")):
+            if result.temperature_K is not None:
+                return result.temperature_K
+            if result.points:
+                return result.points[0].temperature_K
+        return None
+
+    @staticmethod
     def _missing_conditions(task: TaskManifest) -> list[str]:
         missing: list[str] = []
         if (
@@ -968,6 +1443,13 @@ class ConversationOrchestrator:
             missing.append("pressure_kPa")
         if task.calculation_type in {"isothermal_vle", "tp_flash"} and task.conditions.temperature_K is None:
             missing.append("temperature_K")
+        if task.calculation_type == "phase_stability":
+            if task.conditions.temperature_K is None:
+                missing.append("temperature_K")
+            if task.conditions.pressure_kPa is None:
+                missing.append("pressure_kPa")
+            if task.conditions.feed_composition is None:
+                missing.append("feed_composition")
         if task.calculation_type == "tp_flash" and task.conditions.feed_composition is None:
             missing.append("feed_composition")
         if task.calculation_type == "bubble_point" and task.conditions.liquid_composition is None:
