@@ -159,6 +159,31 @@ _NON_REQUEST_CALCULATION_PREFIX = re.compile(
     r"(?:计算|推算)(?:得到|得出|显示|表明|结果|可知|可见)"
 )
 
+#: Property keywords whose value can only come from a deterministic backend.
+_GAMMA_INFINITY_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "无限稀释",
+        "无限稀",
+        "γ∞",
+        "γinf",
+        "gamma infinity",
+        "gamma-infinity",
+        "gamma_inf",
+        "infinite dilution",
+    }
+)
+
+#: "how much is X" question forms that request a numeric value.
+_NUMERIC_QUESTION_WORDS: frozenset[str] = frozenset(
+    {
+        "是多少",
+        "多少",
+        "数值",
+        "值是多少",
+        "为多少",
+    }
+)
+
 
 def _is_thermo_question(question: str) -> bool:
     lower = question.casefold()
@@ -167,11 +192,15 @@ def _is_thermo_question(question: str) -> bool:
 
 def _is_calculation_question(question: str) -> bool:
     lower = question.casefold()
+    if any(kw.casefold() in lower for kw in _GAMMA_INFINITY_KEYWORDS):
+        return True
     if any(kw.casefold() in lower for kw in _CALCULATION_KEYWORDS):
         return True
     if _CALCULATION_REQUEST_PATTERN.search(question):
         if not _NON_REQUEST_CALCULATION_PREFIX.search(question):
             return True
+    if any(word in lower for word in _NUMERIC_QUESTION_WORDS) and _is_thermo_question(question):
+        return True
     return False
 
 

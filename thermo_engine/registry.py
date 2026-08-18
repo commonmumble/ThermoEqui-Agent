@@ -11,6 +11,7 @@ from thermo_engine.clapeyron_backend import ClapeyronPengRobinsonBackend
 from thermo_engine.errors import ThermoEquiError
 from thermo_engine.ideal import IdealRaoultBackend
 from thermo_engine.nrtl_backend import NrtlBackend
+from thermo_engine.pgssi_backend import PgssiBackend
 from thermo_engine.phasepy_backend import PhasepyPengRobinsonBackend
 from thermo_engine.properties import resolve_component
 from thermo_engine.rk_backend import ThermoRkBackend
@@ -334,6 +335,12 @@ DEFAULT_BACKEND_REGISTRY = ThermodynamicBackendRegistry(
                 }
             ),
             factory=WilsonBackend,
+        ),
+        BackendRegistration(
+            canonical_name="PGSSI",
+            aliases=frozenset({"pgssi", "pgssi gamma-infinity", "pgssi gamma infinity"}),
+            supported_calculations=frozenset({"infinite_dilution_activity"}),
+            factory=PgssiBackend,
         ),
     )
 )

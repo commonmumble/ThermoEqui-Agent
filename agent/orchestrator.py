@@ -336,6 +336,41 @@ _NON_REQUEST_CALCULATION_PREFIXES = (
     "模拟计算",
 )
 
+#: Property keywords whose value can only come from a deterministic backend.
+#: A question asking for such a value must be routed to calculation, never to
+#: an LLM free-form answer (the LLM may not fabricate numbers).
+_GAMMA_INFINITY_KEYWORDS = (
+    "无限稀释",
+    "无限稀",
+    "γ∞",
+    "γinf",
+    "gamma infinity",
+    "gamma-infinity",
+    "gamma_inf",
+    "infinite dilution",
+)
+
+#: Thermo keywords used to gate the "how much is X" question form.
+_THERMO_TOPIC_KEYWORDS = (
+    "活度系数",
+    "活度",
+    "相平衡",
+    "气液",
+    "液液",
+    "泡点",
+    "露点",
+    "共沸",
+    "flash",
+    "vle",
+    "lle",
+    "γ∞",
+    "gamma infinity",
+    "无限稀释",
+)
+
+#: Question forms that ask for a numeric value ("how much is X").
+_NUMERIC_QUESTION_WORDS = ("是多少", "多少", "数值", "值是多少", "为多少")
+
 
 _CALCULATION_SEARCH_VERBS = ("搜索", "查找")
 
@@ -343,16 +378,24 @@ _CALCULATION_SEARCH_VERBS = ("搜索", "查找")
 def _is_active_calculation_request(message: str) -> bool:
     """Detect active calculation requests vs passive descriptions of calculations.
 
-    Active: "计算苯-甲苯气液平衡", "帮我求算", "calc the VLE"
+    Active: "计算苯-甲苯气液平衡", "帮我求算", "calc the VLE",
+            "乙醇在水中的无限稀释活度系数是多少" (gamma-infinity value questions
+            and thermo "how much" questions are routed to deterministic calculation)
     Passive: "模型计算得到", "经计算表明", "计算结果显示"
     """
     lower = message.casefold()
     for prefix in _NON_REQUEST_CALCULATION_PREFIXES:
         if prefix.casefold() in lower:
             return False
+    if any(keyword in lower for keyword in _GAMMA_INFINITY_KEYWORDS):
+        return True
     if any(verb.casefold() in lower for verb in _CALCULATION_REQUEST_VERBS):
         return True
     if any(verb.casefold() in lower for verb in _CALCULATION_SEARCH_VERBS):
+        return True
+    if any(word in lower for word in _NUMERIC_QUESTION_WORDS) and any(
+        topic.casefold() in lower for topic in _THERMO_TOPIC_KEYWORDS
+    ):
         return True
     return False
 
@@ -537,6 +580,17 @@ class DeterministicProvider:
     def _calculation_type(lower: str) -> str:
         if "lle" in lower or "液液" in lower or "liquid-liquid" in lower:
             return "lle"
+        if (
+            "无限稀释" in lower
+            or "γ∞" in lower
+            or "γinf" in lower
+            or "gamma infinity" in lower
+            or "gamma-infinity" in lower
+            or "无限稀" in lower
+            or "活度系数" in lower
+            or "gamma_inf" in lower
+        ):
+            return "infinite_dilution_activity"
         if "p-x-y" in lower or "pxy" in lower or "等温" in lower:
             return "isothermal_vle"
         if "flash" in lower:

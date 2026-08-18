@@ -18,12 +18,14 @@ export type CalculationType =
   | "tp_flash"
   | "phase_stability"
   | "azeotrope"
-  | "lle";
+  | "lle"
+  | "infinite_dilution_activity";
 
 export interface ComponentIdentity {
   component_id: string;
   name: string;
   cas_number?: string | null;
+  smiles?: string | null;
   aliases: string[];
 }
 
@@ -74,6 +76,14 @@ export interface EquilibriumPoint {
   liquid_composition: number[];
   vapor_composition: number[];
   equilibrium_residual: number;
+}
+
+export interface GammaInfinityPoint {
+  temperature_K: number;
+  solute_index: number;
+  solvent_index: number;
+  gamma_infinity: number;
+  ln_gamma_infinity: number;
 }
 
 export interface CheckResult {
@@ -144,6 +154,7 @@ export interface CalculationEnvelope {
     model_name: string;
     parameter_set_id?: string | null;
     points: EquilibriumPoint[];
+    gamma_infinity: GammaInfinityPoint[];
     phases: PhaseResult[];
     temperature_K?: number | null;
     pressure_kPa?: number | null;

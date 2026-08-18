@@ -21,6 +21,33 @@ Both pilots remain `production_ready=false`. Their graduation checklist is:
 parameter provenance review, at least one experimental or software-reference
 benchmark, applicability-range checks, and then `production_ready=true`.
 
+## PGSSI first-class pilot (2026-08)
+
+PGSSI (the group's Physics-Guided 3D Solute-Solvent Interaction framework) is now
+integrated as a first-class predictive backend, side by side with
+NRTL/UNIQUAC/Wilson, not as a dependency of any VLE model:
+
+- `PgssiBackend` (`thermo_engine/pgssi_backend.py`) implements the full
+  `ThermodynamicBackend` protocol and is registered in `DEFAULT_BACKEND_REGISTRY`
+  under `PGSSI`, supporting the new `infinite_dilution_activity` calculation type.
+- It predicts temperature-dependent infinite-dilution activity coefficients
+  (`log-gamma_inf = K1 + K2/T`) from solute/solvent SMILES and temperature. It
+  requires no binary `ParameterSet`; a missing checkpoint, SMILES, source tree,
+  or optional dependency is a structured `missing_parameters` failure.
+- VLE/flash operations fail explicitly with `unsupported_model`; PGSSI never
+  pretends to be a phase-equilibrium solver, and no VLE backend depends on PGSSI.
+- A gamma-infinity-to-NRTL regression bridge (`thermo_engine/pgssi_params.py`)
+  converts gamma-infinity data into the production NRTL `a+b/T` parameter form;
+  the full chain (gamma-infinity data -> NRTL parameters -> isobaric bubble point
+  -> validation gate) has been exercised with real ethanol/water data.
+- New endpoint: `POST /api/calculations/infinite-dilution-activity`.
+
+PGSSI remains `production_ready=false`. Graduation requires a trained checkpoint
+(reviewed), experimental gamma-infinity or finite-concentration VLE benchmark
+closure, and applicability review. The group dataset (`39,840` gamma-infinity
+rows) is the candidate benchmark source; any proprietary data must stay out of
+the public repository.
+
 ## P0 hardening (2026-08)
 
 The parameter pipeline is now closed without waiting for new experimental data:

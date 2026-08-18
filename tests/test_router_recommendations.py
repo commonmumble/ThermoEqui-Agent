@@ -19,6 +19,7 @@ def test_load_model_cards_contains_expected_models() -> None:
         "Wilson",
         "NRTL",
         "UNIQUAC",
+        "PGSSI",
     }
 
 

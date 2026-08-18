@@ -529,3 +529,45 @@ def test_malformed_deepseek_envelope_returns_sanitized_fallback_response(
     assert payload["statements"]
     assert payload["statements"][0]["category"] == "Warning"
     assert "upstream-private-content" not in response.text
+
+
+def test_infinite_dilution_activity_endpoint_fails_structurally_without_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("PGSSI_CHECKPOINT", raising=False)
+
+    with client() as test_client:
+        response = test_client.post(
+            "/api/calculations/infinite-dilution-activity",
+            json={
+                "equilibrium_type": "VLE",
+                "calculation_type": "infinite_dilution_activity",
+                "components": [
+                    {
+                        "component_id": "ethanol",
+                        "name": "ethanol",
+                        "cas_number": "64-17-5",
+                        "smiles": "CCO",
+                        "aliases": [],
+                    },
+                    {
+                        "component_id": "water",
+                        "name": "water",
+                        "cas_number": "7732-18-5",
+                        "smiles": "O",
+                        "aliases": [],
+                    },
+                ],
+                "conditions": {"temperature_K": 298.15},
+                "composition_basis": "mole_fraction",
+                "requested_outputs": ["table", "validation"],
+                "validation_requirements": ["composition_balance", "equilibrium_residual", "convergence"],
+                "assumptions": [],
+                "points": 21,
+                "parameters": [],
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "missing_parameters"
+    assert "checkpoint" in response.json()["error"]["message"].casefold()
