@@ -246,8 +246,22 @@ def _has_chinese_chemical_role_evidence(message: str, start: int, end: int) -> b
     if suffix and suffix[0] in separators:
         return True
     chemical_keywords = (
-        "体系", "物系", "溶液", "混合物", "平衡", "相", "气液", "液液",
-        "计算", "模拟", "闪蒸", "泡点", "露点", "曲线", "组成", "浓度",
+        "体系",
+        "物系",
+        "溶液",
+        "混合物",
+        "平衡",
+        "相",
+        "气液",
+        "液液",
+        "计算",
+        "模拟",
+        "闪蒸",
+        "泡点",
+        "露点",
+        "曲线",
+        "组成",
+        "浓度",
     )
     combined = prefix + suffix
     for kw in chemical_keywords:
@@ -277,6 +291,7 @@ def has_chemical_role_evidence(message: str, start: int, end: int) -> bool:
         r"\s*(?:and\b|with\b|at\b|(?:tp\s*)?flash\b|bubble\b|dew\b|vle\b|"
         r"azeotrope\b|equilibrium\b|composition\b|t-x-y\b|p-x-y\b|"
         r"和|与|、|在|的|常压|汽液|液液|泡点|露点|相平衡|曲线|闪蒸|"
+        r"体系|物系|混合物|系统|组分|"
         r"[-/—+]|[)）]|及)",
         suffix,
     )

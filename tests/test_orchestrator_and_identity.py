@@ -5,8 +5,7 @@ from __future__ import annotations
 import pytest
 
 from agent.orchestrator import ConversationOrchestrator, DeterministicProvider
-from agent.providers import LLMProviderOutputError
-from schemas.domain import ComponentIdentity, TaskManifest, ThermodynamicConditions
+from schemas.domain import ComponentIdentity
 from thermo_engine.identity import has_chemical_role_evidence, is_electrolyte_identity, resolve_literal_components
 
 

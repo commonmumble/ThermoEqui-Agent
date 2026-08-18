@@ -298,10 +298,24 @@ def _has_positive_scope_marker(message: str, markers: tuple[str, ...]) -> bool:
             # Check if there's an active request verb nearby
             if _REQUEST_VERBS.search(context):
                 return True
+            # Chinese "计算聚合物" / "模拟电解质" style: an action verb directly
+            # adjacent to an excluded topic is an active request.
+            verb_prefix = lower[max(0, match.start() - 8) : match.start()]
+            if re.search(r"(?:设计|模拟|优化|搭建|建立|开发|计算|做|搞|进行)\s*$", verb_prefix):
+                return True
             # Also check if the marker appears as a standalone topic
             # (preceded by punctuation or start of string)
             before = lower[max(0, match.start() - 5) : match.start()]
-            if match.start() == 0 or re.search(r"[\s，,。.！!？?、；;：:（(]\s*$", before):
+            after = lower[match.end() : min(len(lower), match.end() + 24)]
+            negated = (
+                re.search(
+                    r"(?:without|excluding|exclude|free\s+of|with\s+no|no\s+)\s*$",
+                    lower[max(0, match.start() - 40) : match.start()],
+                )
+                is not None
+                or re.match(r"(?:[a-z]+)?\s*(?:-free\b|free\b)", after) is not None
+            )
+            if not negated and (match.start() == 0 or re.search(r"[\s，,。.！!？?、；;：:（(]\s*$", before)):
                 return True
     # Check for flexible word-order combinations (e.g., "设计一个精馏塔")
     # Only when there's an explicit request prefix + verb pattern
