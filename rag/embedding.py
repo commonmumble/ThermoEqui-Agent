@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import warnings
 from typing import Protocol
 
 import numpy as np
@@ -45,9 +44,8 @@ class SentenceTransformerEmbedding:
                 self._model = SentenceTransformer(self.model_name)
             except ImportError:
                 raise RuntimeError(
-                    "sentence-transformers is not installed. "
-                    "Install with: pip install sentence-transformers"
-                )
+                    "sentence-transformers is not installed. Install with: pip install sentence-transformers"
+                ) from None
         return self._model
 
     def embed(self, texts: list[str]) -> list[np.ndarray]:

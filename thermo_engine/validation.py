@@ -110,9 +110,7 @@ def validate_result(result: CalculationResult) -> ValidationReport:
             passed=result.converged and result.failure is None,
             metric=1.0 if result.converged else 0.0,
             tolerance=1.0,
-            message="PGSSI prediction completed."
-            if result.converged
-            else "PGSSI prediction did not complete.",
+            message="PGSSI prediction completed." if result.converged else "PGSSI prediction did not complete.",
         )
         applicability = CheckResult(
             passed=conditions_valid and has_conditions,

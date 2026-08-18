@@ -103,9 +103,7 @@ def test_single_component_fails_with_missing_data() -> None:
 
 
 def test_missing_temperature_fails_with_missing_data() -> None:
-    task = gamma_task().model_copy(
-        update={"conditions": ThermodynamicConditions()}
-    )
+    task = gamma_task().model_copy(update={"conditions": ThermodynamicConditions()})
     settings = PgssiSettings(
         checkpoint_path=Path("unused.pth"),
         hidden_dim=512,

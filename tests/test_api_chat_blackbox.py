@@ -178,4 +178,9 @@ def test_chat_can_follow_up_with_same_conversation_id() -> None:
     assert second.status_code == 200
     second_payload = second.json()
     assert second_payload["conversation_id"] == conversation_id
-    assert second_payload["intent"] in {"EQUILIBRIUM_CALCULATION", "TASK_CORRECTION", "MODEL_SELECTION_QA", "CONCEPT_QA"}
+    assert second_payload["intent"] in {
+        "EQUILIBRIUM_CALCULATION",
+        "TASK_CORRECTION",
+        "MODEL_SELECTION_QA",
+        "CONCEPT_QA",
+    }

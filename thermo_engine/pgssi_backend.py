@@ -309,9 +309,7 @@ class PgssiBackend(ThermodynamicBackend):
                         ln_gamma_infinity=ln_value,
                     )
                 )
-        warnings.append(
-            "PGSSI is a predictive pilot; benchmark closure and applicability review are pending."
-        )
+        warnings.append("PGSSI is a predictive pilot; benchmark closure and applicability review are pending.")
         return CalculationResult(
             task_id=request.task_id,
             calculation_type="infinite_dilution_activity",

@@ -43,8 +43,10 @@ parameter_set = regress_nrtl_from_gamma_infinity(
     source_identifier=DATA,
     quality_level="pgssi-regressed-unreviewed",
 )
-print(f"Regressed NRTL: tau12_b={parameter_set.parameters['tau12_b']:.4f} "
-      f"tau21_b={parameter_set.parameters['tau21_b']:.4f} alpha={parameter_set.parameters['alpha']}")
+print(
+    f"Regressed NRTL: tau12_b={parameter_set.parameters['tau12_b']:.4f} "
+    f"tau21_b={parameter_set.parameters['tau21_b']:.4f} alpha={parameter_set.parameters['alpha']}"
+)
 print(f"Temperature range: {parameter_set.temperature_range_K}")
 
 task = TaskManifest(
