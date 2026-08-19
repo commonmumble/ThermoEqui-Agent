@@ -39,8 +39,20 @@ from thermo_engine.errors import ThermoEquiError
 logger = logging.getLogger("thermoequi.pgssi")
 
 PGSSI_MODEL_NAME = "PGSSI"
-#: Default checkpoint location, mirroring the PGSSI training repository layout.
-DEFAULT_CHECKPOINT_PATH = Path(os.getenv("PGSSI_CHECKPOINT", "")) if os.getenv("PGSSI_CHECKPOINT") else None
+
+
+def _checkpoint_from_env() -> Path | None:
+    """Read PGSSI_CHECKPOINT at call time so .env loading order does not matter.
+
+    ``apps.api.main`` calls ``load_dotenv()`` after importing the backend
+    modules; reading the environment lazily here guarantees the .env values
+    are honored regardless of import order.
+    """
+    value = os.getenv("PGSSI_CHECKPOINT", "").strip()
+    if not value:
+        return None
+    return Path(value)
+
 
 _REQUIRED_MODULES = ("torch", "torch_geometric", "rdkit")
 _ARCHITECTURE_IMPORT_ERRORS: list[str] = []
@@ -107,10 +119,12 @@ class PgssiSettings:
 def resolve_pgssi_settings() -> PgssiSettings:
     """Resolve PGSSI checkpoint and hyper-parameters from the environment.
 
-    Raises a structured ``missing_parameters`` failure when the checkpoint is
-    absent, mirroring the parameter-missing convention of the repository.
+    Environment values are read lazily so a later ``load_dotenv()`` in the
+    application entrypoint is honored.  Raises a structured
+    ``missing_parameters`` failure when the checkpoint is absent, mirroring the
+    parameter-missing convention of the repository.
     """
-    checkpoint = DEFAULT_CHECKPOINT_PATH
+    checkpoint = _checkpoint_from_env()
     if checkpoint is None or not checkpoint.is_file():
         raise ThermoEquiError(
             FailureType.MISSING_PARAMETERS,
