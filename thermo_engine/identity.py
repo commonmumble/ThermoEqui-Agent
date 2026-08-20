@@ -290,10 +290,10 @@ def has_chemical_role_evidence(message: str, start: int, end: int) -> bool:
         prefix,
     )
     after = re.match(
-        r"\s*(?:and\b|with\b|at\b|(?:tp\s*)?flash\b|bubble\b|dew\b|vle\b|"
-        r"azeotrope\b|equilibrium\b|composition\b|t-x-y\b|p-x-y\b|"
+        r"\s*(?:and\b|with\b|at\b|in\b|(?:tp\s*)?flash\b|bubble\b|dew\b|vle\b|"
+        r"azeotrope\b|equilibrium\b|composition\b|t-x-y|p-x-y|"
         r"和|与|、|在|的|常压|汽液|液液|泡点|露点|相平衡|曲线|闪蒸|"
-        r"体系|物系|混合物|系统|组分|"
+        r"体系|物系|混合物|系统|组分|中|里|内|"
         r"[-/—+]|[)）]|及)",
         suffix,
     )

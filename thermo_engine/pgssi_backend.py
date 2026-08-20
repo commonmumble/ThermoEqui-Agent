@@ -58,6 +58,34 @@ _REQUIRED_MODULES = ("torch", "torch_geometric", "rdkit")
 _ARCHITECTURE_IMPORT_ERRORS: list[str] = []
 
 
+def _ensure_torch_scatter_compat() -> None:
+    """Provide a torch_scatter.scatter_add shim when the C++ extension is absent.
+
+    The PGSSI architecture imports ``from torch_scatter import scatter_add``.
+    torch_scatter is a compiled extension that often has no wheel for the
+    installed torch version; PyG ships an equivalent ``torch_geometric.utils.
+    scatter`` (``reduce="add"``) with a compatible signature, so we expose it
+    under the torch_scatter name only when the real package is unavailable.
+    """
+    import sys
+
+    if "torch_scatter" in sys.modules or importlib.util.find_spec("torch_scatter") is not None:
+        return
+    try:
+        from torch_geometric.utils import scatter as _pyg_scatter
+
+        def _scatter_add(src, index, dim: int = 0, dim_size: int | None = None, fill_value: float = 0.0):
+            del fill_value
+            return _pyg_scatter(src, index, dim=dim, dim_size=dim_size, reduce="add")
+
+        module = type(sys)("torch_scatter")
+        module.scatter_add = _scatter_add  # type: ignore[attr-defined]
+        sys.modules["torch_scatter"] = module
+        logger.debug("Injected torch_scatter compatibility shim via torch_geometric scatter.")
+    except ImportError:  # pragma: no cover - torch_geometric itself missing
+        _ARCHITECTURE_IMPORT_ERRORS.append("torch_geometric is unavailable for the torch_scatter shim")
+
+
 def _load_pgssi_architecture() -> Any:
     """Import the PGSSI model architecture from the group repository, if reachable.
 
@@ -82,6 +110,7 @@ def _load_pgssi_architecture() -> Any:
 
     if str(source_path) not in sys.path:
         sys.path.insert(0, str(source_path))
+    _ensure_torch_scatter_compat()
     try:
         from PGSSI_3D_architecture import PGSSIModel  # type: ignore[import-not-found]
     except ImportError as error:  # pragma: no cover - environment dependent
@@ -155,8 +184,8 @@ class _PgssiPredictor:
         _check_optional_dependencies()
         import torch
 
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model_cls = _load_pgssi_architecture()
+        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = model_cls(
             hidden_dim=self._settings.hidden_dim,
             enable_cross_interaction=self._settings.enable_cross_interaction,
@@ -167,16 +196,35 @@ class _PgssiPredictor:
             if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint
             else checkpoint
         )
-        model.load_state_dict(state_dict, strict=False)
+        # strict=True: the architecture must match the checkpoint exactly; any
+        # mismatch is a hard failure instead of silently wrong predictions.
+        model.load_state_dict(state_dict, strict=True)
         model.eval()
         self._model = model
 
     def predict(self, solute_smiles: str, solvent_smiles: str, temperatures_k: list[float]) -> list[float]:
         """Return log-gamma_infinity predictions at the requested temperatures."""
         self._ensure_loaded()
+        import sys
+
+        source_dir = os.getenv("PGSSI_SRC", "").strip()
+        if not source_dir:
+            raise ThermoEquiError(
+                FailureType.MISSING_PARAMETERS,
+                "PGSSI requires the PGSSI source directory for data building.",
+                "Set PGSSI_SRC to the PGSSI repository src/models/PGSSI directory.",
+            )
+        source_path = Path(source_dir)
+        # PGSSI_data / PGSSI_train import ``src.models.PGSSI.PGSSI_3D_architecture``,
+        # so the repository root (parent of src/) must also be importable.
+        for entry in (source_path, source_path.parents[2]):
+            if str(entry) not in sys.path:
+                sys.path.insert(0, str(entry))
+        _ensure_torch_scatter_compat()
+
         import pandas as pd
         import torch
-        from PGSSI_train import build_dataset  # type: ignore[import-not-found]
+        from PGSSI_data import build_pair_dataset  # type: ignore[import-not-found]
         from torch_geometric.loader import DataLoader
 
         df = pd.DataFrame(
@@ -186,7 +234,23 @@ class _PgssiPredictor:
                 "T": [float(value) - 273.15 for value in temperatures_k],
             }
         )
-        dataset = build_dataset(df, None)
+        cache_dir = Path(os.getenv("PGSSI_CACHE_DIR", str(Path.cwd() / ".pgssi-cache")))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        import hashlib
+
+        cache_key = hashlib.sha256(
+            (
+                f"{solute_smiles}|{solvent_smiles}|{len(temperatures_k)}|"
+                f"{min(temperatures_k):.2f}|{max(temperatures_k):.2f}"
+            ).encode()
+        ).hexdigest()[:16]
+        cache_path = cache_dir / f"pred_{cache_key}.pt"
+        dataset = build_pair_dataset(
+            df,
+            str(cache_path),
+            include_k_targets=False,
+            cache_desc="build PGSSI 3D dataset",
+        )
         loader = DataLoader(dataset, batch_size=len(temperatures_k), shuffle=False, num_workers=0)
         predictions: list[float] = []
         with torch.no_grad():
@@ -259,6 +323,11 @@ class PgssiBackend(ThermodynamicBackend):
 
         Components are ordered solute-first: component[0] is the solute and
         component[1] is the solvent for each pair.
+
+        Two modes:
+        - Single point: ``conditions.temperature_K`` given (and no span).
+        - Curve: ``conditions.temperature_span_K = [low, high]`` given; the
+          backend sweeps ``request.points`` temperatures across the span.
         """
         settings = self._resolve_settings()
         components = request.components
@@ -268,12 +337,18 @@ class PgssiBackend(ThermodynamicBackend):
                 "PGSSI needs at least a solute and a solvent component.",
                 "Provide two components; the first is the solute and the second the solvent.",
             )
-        temperatures = request.conditions.temperature_K
-        if temperatures is None:
+        span = request.conditions.temperature_span_K
+        single_temperature = request.conditions.temperature_K
+        if span is not None:
+            low, high = span
+            temperatures = np.linspace(low, high, request.points).tolist()
+        elif single_temperature is not None:
+            temperatures = [single_temperature]
+        else:
             raise ThermoEquiError(
                 FailureType.MISSING_DATA,
                 "PGSSI gamma-infinity prediction requires a temperature.",
-                "Provide temperature_K in the task conditions.",
+                "Provide temperature_K (single point) or temperature_span_K (curve) in the task conditions.",
             )
         predictor = _PgssiPredictor(settings)
         points: list[GammaInfinityPoint] = []
@@ -299,7 +374,7 @@ class PgssiBackend(ThermodynamicBackend):
                         },
                     )
                 try:
-                    ln_gamma = predictor.predict(solute.smiles, solvent.smiles, [temperatures])
+                    ln_gamma_values = predictor.predict(solute.smiles, solvent.smiles, temperatures)
                 except (KeyError, TypeError, ValueError) as error:
                     raise ThermoEquiError(
                         FailureType.MISSING_PARAMETERS,
@@ -307,22 +382,22 @@ class PgssiBackend(ThermodynamicBackend):
                         "Verify the component identities and PGSSI dependencies.",
                         {"solute": solute.name, "solvent": solvent.name},
                     ) from error
-                ln_value = float(ln_gamma[0])
-                if not np.isfinite(ln_value):
-                    raise ThermoEquiError(
-                        FailureType.PHYSICAL_VALIDATION_FAILURE,
-                        f"PGSSI returned a non-finite gamma-infinity for {solute.name} in {solvent.name}.",
-                        "Do not use this result; review the checkpoint and component identities.",
+                for temperature, ln_value in zip(temperatures, ln_gamma_values, strict=True):
+                    if not np.isfinite(ln_value):
+                        raise ThermoEquiError(
+                            FailureType.PHYSICAL_VALIDATION_FAILURE,
+                            f"PGSSI returned a non-finite gamma-infinity for {solute.name} in {solvent.name}.",
+                            "Do not use this result; review the checkpoint and component identities.",
+                        )
+                    points.append(
+                        GammaInfinityPoint(
+                            temperature_K=float(temperature),
+                            solute_index=solute_index,
+                            solvent_index=solvent_index,
+                            gamma_infinity=float(np.exp(ln_value)),
+                            ln_gamma_infinity=ln_value,
+                        )
                     )
-                points.append(
-                    GammaInfinityPoint(
-                        temperature_K=temperatures,
-                        solute_index=solute_index,
-                        solvent_index=solvent_index,
-                        gamma_infinity=float(np.exp(ln_value)),
-                        ln_gamma_infinity=ln_value,
-                    )
-                )
         warnings.append("PGSSI is a predictive pilot; benchmark closure and applicability review are pending.")
         return CalculationResult(
             task_id=request.task_id,
@@ -330,7 +405,7 @@ class PgssiBackend(ThermodynamicBackend):
             input_snapshot=request.model_dump(mode="json"),
             model_name=self.model_name,
             gamma_infinity=points,
-            temperature_K=temperatures,
+            temperature_K=float(temperatures[0]) if len(temperatures) == 1 else None,
             converged=True,
             residual=0.0,
             iterations=0,

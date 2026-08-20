@@ -33,18 +33,21 @@ from thermo_engine.units import pressure_to_kpa, temperature_to_kelvin
 
 _MODEL_ALLOWED_FOR_AUTO = {"Wilson", "NRTL", "UNIQUAC"}
 
+#: (component_id, name, cas_number, aliases, smiles).  The SMILES are used by
+#: SMILES-grounded backends such as PGSSI; they are the standard canonical
+#: forms used by the PGSSI training dataset.
 COMPONENT_PATTERNS = (
-    ("benzene", "Benzene", "71-43-2", ("苯", "benzene")),
-    ("toluene", "Toluene", "108-88-3", ("甲苯", "toluene")),
-    ("ethanol", "Ethanol", "64-17-5", ("乙醇", "ethanol")),
-    ("acetone", "Acetone", "67-64-1", ("丙酮", "acetone")),
-    ("methane", "Methane", "74-82-8", ("甲烷", "methane")),
-    ("ethane", "Ethane", "74-84-0", ("乙烷", "ethane")),
-    ("propane", "Propane", "74-98-6", ("丙烷", "propane")),
-    ("nitrogen", "Nitrogen", "7727-37-9", ("氮气", "nitrogen", "n2")),
-    ("water", "Water", "7732-18-5", ("水", "water")),
-    ("methanol", "Methanol", "67-56-1", ("甲醇", "methanol")),
-    ("carbon-dioxide", "Carbon dioxide", "124-38-9", ("二氧化碳", "carbon dioxide", "co2")),
+    ("benzene", "Benzene", "71-43-2", ("苯", "benzene"), "c1ccccc1"),
+    ("toluene", "Toluene", "108-88-3", ("甲苯", "toluene"), "Cc1ccccc1"),
+    ("ethanol", "Ethanol", "64-17-5", ("乙醇", "ethanol"), "CCO"),
+    ("acetone", "Acetone", "67-64-1", ("丙酮", "acetone"), "CC(=O)C"),
+    ("methane", "Methane", "74-82-8", ("甲烷", "methane"), "C"),
+    ("ethane", "Ethane", "74-84-0", ("乙烷", "ethane"), "CC"),
+    ("propane", "Propane", "74-98-6", ("丙烷", "propane"), "CCC"),
+    ("nitrogen", "Nitrogen", "7727-37-9", ("氮气", "nitrogen", "n2"), "N#N"),
+    ("water", "Water", "7732-18-5", ("水", "water"), "O"),
+    ("methanol", "Methanol", "67-56-1", ("甲醇", "methanol"), "CO"),
+    ("carbon-dioxide", "Carbon dioxide", "124-38-9", ("二氧化碳", "carbon dioxide", "co2"), "O=C=O"),
 )
 
 _NUMBER_PATTERN = r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -165,11 +168,12 @@ def _mentioned_components(message: str) -> list[ComponentIdentity]:
         return []
     lower = message.casefold()
     candidates: list[tuple[int, int, int, ComponentIdentity]] = []
-    for component_id, name, cas_number, aliases in COMPONENT_PATTERNS:
+    for component_id, name, cas_number, aliases, smiles in COMPONENT_PATTERNS:
         component = ComponentIdentity(
             component_id=component_id,
             name=name,
             cas_number=cas_number,
+            smiles=smiles,
             aliases=list(aliases),
         )
         for alias in aliases:
@@ -665,6 +669,7 @@ class DeterministicProvider:
         component_list = _requested_components(message)
         pressure, pressure_assumption = self._pressure(message)
         temperature = self._temperature(message)
+        temperature_span = self._temperature_span(message)
         _CORRECTION_OR_CONTINUATION_STRONG = (
             "改为",
             "改成",
@@ -767,7 +772,11 @@ class DeterministicProvider:
         if calculation_type not in {"tp_flash", "phase_stability", "lle"}:
             equilibrium_type = "VLE"
         assumptions = [pressure_assumption] if pressure_assumption else []
-        conditions = ThermodynamicConditions(temperature_K=temperature, pressure_kPa=pressure)
+        conditions = ThermodynamicConditions(
+            temperature_K=temperature,
+            temperature_span_K=temperature_span,
+            pressure_kPa=pressure,
+        )
         return TaskManifest(
             equilibrium_type=equilibrium_type,
             calculation_type=calculation_type,
@@ -840,12 +849,40 @@ class DeterministicProvider:
 
     @staticmethod
     def _temperature(message: str) -> float | None:
-        match = re.search(r"(\d+(?:\.\d+)?)\s*(k|℃|°c|c)\b", message, re.IGNORECASE)
+        # 排除 kPa/mpa/bar/atm 等压力单位里的 k/c 误匹配
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(k(?![pab])|℃|°c|c(?![mabd]))",
+            message,
+            re.IGNORECASE,
+        )
         if not match:
             return None
-        if match.group(2).casefold() == "k":
+        unit = match.group(2).casefold()
+        if unit == "k":
             return temperature_to_kelvin(float(match.group(1)), "K")
         return temperature_to_kelvin(float(match.group(1)), "C")
+
+    @staticmethod
+    def _temperature_span(message: str) -> tuple[float, float] | None:
+        """Extract a temperature range (e.g. '280到360K', '280-360 K', '20到80°C')."""
+        # 数字 + 分隔词(到/至/-/~) + 数字 + 单位；排除 kPa 等压力单位的误匹配
+        match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(?:到|至|－|—|-|~|～)\s*(\d+(?:\.\d+)?)\s*(k(?![pab])|℃|°c|c(?![mabd]))",
+            message,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        unit = match.group(3).casefold()
+        if unit == "k":
+            low = temperature_to_kelvin(float(match.group(1)), "K")
+            high = temperature_to_kelvin(float(match.group(2)), "K")
+        else:
+            low = temperature_to_kelvin(float(match.group(1)), "C")
+            high = temperature_to_kelvin(float(match.group(2)), "C")
+        if low >= high:
+            return None
+        return (low, high)
 
     @staticmethod
     def _calculation_type(lower: str) -> str:
@@ -866,7 +903,7 @@ class DeterministicProvider:
             return "infinite_dilution_activity"
         if "p-x-y" in lower or "pxy" in lower or "等温" in lower:
             return "isothermal_vle"
-        if "flash" in lower:
+        if "flash" in lower or "闪蒸" in lower:
             return "tp_flash"
         if "泡点" in lower or "bubble" in lower:
             return "bubble_point"
@@ -901,6 +938,15 @@ def _build_calculation_summary(
             parts.append(f"汽化分率 β={result.vapor_fraction:.4f}")
     elif result.points:
         parts.append(f"数据点：{len(result.points)} 个")
+    elif result.gamma_infinity:
+        parts.append(f"γ∞ 预测：{len(result.gamma_infinity)} 个方向")
+        for point in result.gamma_infinity:
+            solute = components[point.solute_index].name
+            solvent = components[point.solvent_index].name
+            parts.append(
+                f"γ∞({solute}→{solvent}) = {point.gamma_infinity:.4f} "
+                f"(ln γ∞ = {point.ln_gamma_infinity:.4f} @ {point.temperature_K:.2f} K)"
+            )
 
     parts.append(f"验证：{envelope.validation.overall_status}")
 

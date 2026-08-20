@@ -24,6 +24,7 @@ pytest-cache-files-*/
 # Private ML weights: never commit trained model checkpoints.
 # Members place their own .pth files here or point PGSSI_CHECKPOINT elsewhere.
 weights/
+.pgssi-cache/
 *.pth
 *.pt
 *.ckpt

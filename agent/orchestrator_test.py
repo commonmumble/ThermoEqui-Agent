@@ -29,17 +29,17 @@ from thermo_engine.identity import (
 from thermo_engine.units import pressure_to_kpa, temperature_to_kelvin
 
 COMPONENT_PATTERNS = (
-    ("benzene", "Benzene", "71-43-2", ("苯", "benzene")),
-    ("toluene", "Toluene", "108-88-3", ("甲苯", "toluene")),
-    ("ethanol", "Ethanol", "64-17-5", ("乙醇", "ethanol")),
-    ("acetone", "Acetone", "67-64-1", ("丙酮", "acetone")),
-    ("methane", "Methane", "74-82-8", ("甲烷", "methane")),
-    ("ethane", "Ethane", "74-84-0", ("乙烷", "ethane")),
-    ("propane", "Propane", "74-98-6", ("丙烷", "propane")),
-    ("nitrogen", "Nitrogen", "7727-37-9", ("氮气", "nitrogen", "n2")),
-    ("water", "Water", "7732-18-5", ("水", "water")),
-    ("methanol", "Methanol", "67-56-1", ("甲醇", "methanol")),
-    ("carbon-dioxide", "Carbon dioxide", "124-38-9", ("二氧化碳", "carbon dioxide", "co2")),
+    ("benzene", "Benzene", "71-43-2", ("苯", "benzene"), "c1ccccc1"),
+    ("toluene", "Toluene", "108-88-3", ("甲苯", "toluene"), "Cc1ccccc1"),
+    ("ethanol", "Ethanol", "64-17-5", ("乙醇", "ethanol"), "CCO"),
+    ("acetone", "Acetone", "67-64-1", ("丙酮", "acetone"), "CC(=O)C"),
+    ("methane", "Methane", "74-82-8", ("甲烷", "methane"), "C"),
+    ("ethane", "Ethane", "74-84-0", ("乙烷", "ethane"), "CC"),
+    ("propane", "Propane", "74-98-6", ("丙烷", "propane"), "CCC"),
+    ("nitrogen", "Nitrogen", "7727-37-9", ("氮气", "nitrogen", "n2"), "N#N"),
+    ("water", "Water", "7732-18-5", ("水", "water"), "O"),
+    ("methanol", "Methanol", "67-56-1", ("甲醇", "methanol"), "CO"),
+    ("carbon-dioxide", "Carbon dioxide", "124-38-9", ("二氧化碳", "carbon dioxide", "co2"), "O=C=O"),
 )
 
 _NUMBER_PATTERN = r"(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -86,11 +86,12 @@ _MODEL_TOPIC_MARKERS = (
 def _mentioned_components(message: str) -> list[ComponentIdentity]:
     lower = message.casefold()
     candidates: list[tuple[int, int, int, ComponentIdentity]] = []
-    for component_id, name, cas_number, aliases in COMPONENT_PATTERNS:
+    for component_id, name, cas_number, aliases, smiles in COMPONENT_PATTERNS:
         component = ComponentIdentity(
             component_id=component_id,
             name=name,
             cas_number=cas_number,
+            smiles=smiles,
             aliases=list(aliases),
         )
         for alias in aliases:

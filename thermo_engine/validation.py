@@ -64,6 +64,8 @@ def validate_result(result: CalculationResult) -> ValidationReport:
         temperatures.append(result.temperature_K)
     if result.pressure_kPa is not None:
         pressures.append(result.pressure_kPa)
+    if result.calculation_type == "infinite_dilution_activity":
+        temperatures.extend(point.temperature_K for point in result.gamma_infinity)
     conditions_valid = all(value > 0 for value in [*temperatures, *pressures])
     has_conditions = bool(temperatures or pressures)
     point_based = result.calculation_type in {

@@ -35,6 +35,7 @@ export interface Conditions {
   liquid_composition?: number[] | null;
   vapor_composition?: number[] | null;
   feed_composition?: number[] | null;
+  temperature_span_K?: [number, number] | null;
 }
 
 export interface ParameterSet {

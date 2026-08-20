@@ -95,6 +95,10 @@ class ThermodynamicConditions(BaseModel):
     liquid_composition: list[float] | None = None
     vapor_composition: list[float] | None = None
     feed_composition: list[float] | None = None
+    #: Optional low/high temperature bounds for curve-style calculations such as
+    #: PGSSI gamma-infinity(T).  When set together with ``points`` the backend
+    #: sweeps a curve; when absent, ``temperature_K`` is a single point.
+    temperature_span_K: tuple[float, float] | None = None
 
     @model_validator(mode="after")
     def validate_compositions(self) -> ThermodynamicConditions:
@@ -106,6 +110,10 @@ class ThermodynamicConditions(BaseModel):
                 raise ValueError(f"{label} must contain mole fractions in [0, 1]")
             if abs(sum(values) - 1.0) > 1e-8:
                 raise ValueError(f"{label} must sum to one within 1e-8")
+        if self.temperature_span_K is not None:
+            lower, upper = self.temperature_span_K
+            if lower <= 0 or upper <= lower:
+                raise ValueError("temperature_span_K must contain positive ascending bounds")
         return self
 
 
