@@ -71,6 +71,7 @@ The following pieces are currently in place:
 | `NRTL` | `internal` | `available` | `true` | Low-/moderate-pressure non-ideal VLE and flash for ChemSep-validated ethanol/water and ethanol/benzene binaries; legacy DECHEMA sets remain prototype |
 | `UNIQUAC` | `internal` | `available` | `true` | Low-/moderate-pressure non-ideal VLE and flash for ChemSep-validated ethanol/water and ethanol/benzene binaries; UNIQUAC benchmarks exclude pure endpoints |
 | `Wilson` | `internal` | `available` | `true` | Low-/moderate-pressure VLE and flash for ChemSep-validated ethanol/water and ethanol/benzene binaries; LLE is explicitly rejected |
+| `PGSSI` | `pgssi` | `available` | `false` | First-class predictive backend for temperature-dependent infinite-dilution activity coefficients (gamma-infinity) from SMILES; requires a trained checkpoint; benchmark closure pending |
 
 ## Current Filtering Rules
 
@@ -221,6 +222,31 @@ Current status:
 
 - Pilot `thermo.RKMIX` backend is implemented and registered
 - `production_ready` is `false` until reviewed kij coverage and benchmark closure are complete
+
+### PGSSI
+
+Applicable to:
+
+- Temperature-dependent infinite-dilution activity coefficient (gamma-infinity) prediction
+  from solute/solvent SMILES and temperature (`infinite_dilution_activity` calculation type)
+- Systems whose components carry SMILES identities
+
+Rejected when:
+
+- The requested calculation type is not `infinite_dilution_activity`
+- No trained PGSSI checkpoint is configured (`PGSSI_CHECKPOINT`)
+- The PGSSI source tree is not reachable (`PGSSI_SRC`)
+- torch / torch_geometric / rdkit are not installed
+- A component lacks a SMILES identity
+
+Current status:
+
+- First-class `PgssiBackend` implemented and registered next to NRTL/UNIQUAC/Wilson;
+  it is independent of binary `ParameterSet` records and no VLE backend depends on it
+- `production_ready` is `false` until experimental benchmark closure and applicability review
+- A gamma-infinity-to-NRTL parameter regression bridge (`thermo_engine/pgssi_params.py`) is
+  available as an optional auxiliary; regressed parameters require finite-concentration VLE
+  validation before production use
 
 ## Current Boundary
 

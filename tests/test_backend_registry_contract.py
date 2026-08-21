@@ -112,6 +112,7 @@ def test_every_registered_backend_implements_the_full_protocol_seam() -> None:
         "phase_stability",
         "azeotrope",
         "lle",
+        "infinite_dilution_activity",
     )
     for registration in DEFAULT_BACKEND_REGISTRY.registrations:
         backend = registration.factory()

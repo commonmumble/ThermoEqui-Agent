@@ -50,7 +50,7 @@ thermoequi-seed = "thermo_engine.seed:main"
 include = ["agent*", "apps*", "benchmarks*", "database*", "schemas*", "thermo_engine*"]
 
 [tool.pytest.ini_options]
-addopts = "-q --strict-markers -p no:cacheprovider"
+addopts = "-q --strict-markers -p no:cacheprovider --basetemp=.pytest-tmp"
 testpaths = ["tests", "evals"]
 asyncio_default_fixture_loop_scope = "function"
 

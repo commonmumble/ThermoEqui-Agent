@@ -24,8 +24,7 @@ def populated_memory(memory: ConversationMemory) -> ConversationMemory:
             "session_id": "session-1",
             "question": "什么是活度系数？",
             "answer": (
-                "活度系数是描述实际溶液偏离理想溶液程度的参数，用γ表示。"
-                "γ=1为理想溶液，γ>1为正偏差，γ<1为负偏差。"
+                "活度系数是描述实际溶液偏离理想溶液程度的参数，用γ表示。γ=1为理想溶液，γ>1为正偏差，γ<1为负偏差。"
             ),
             "intent": "CONCEPT_QA",
             "components": [],

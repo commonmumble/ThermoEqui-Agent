@@ -366,6 +366,26 @@ def lle(task: TaskManifest, request: Request) -> CalculationEnvelope:
     )
 
 
+@app.post("/api/calculations/infinite-dilution-activity", response_model=CalculationEnvelope)
+def infinite_dilution_activity(task: TaskManifest, request: Request) -> CalculationEnvelope:
+    """PGSSI infinite-dilution activity coefficient prediction.
+
+    The first component is the solute and the second the solvent.  Requires the
+    PGSSI checkpoint (PGSSI_CHECKPOINT), the PGSSI source tree (PGSSI_SRC), and
+    SMILES on every component.
+    """
+    return execute(
+        task.model_copy(
+            update={
+                "calculation_type": "infinite_dilution_activity",
+                "equilibrium_type": "VLE",
+                "model_name": "PGSSI",
+            }
+        ),
+        request.state.request_id,
+    )
+
+
 @app.post("/api/validation", response_model=ValidationReport)
 def validation(result: CalculationResult) -> ValidationReport:
     return validate_equilibrium_result(result)

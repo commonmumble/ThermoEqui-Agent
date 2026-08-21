@@ -19,6 +19,7 @@ CalculationType: TypeAlias = Literal[
     "phase_stability",
     "azeotrope",
     "lle",
+    "infinite_dilution_activity",
 ]
 RunStatus: TypeAlias = Literal["passed", "warning", "failed"]
 
@@ -47,6 +48,11 @@ _CALCULATION_TYPE_ALIASES: dict[str, CalculationType] = {
     "azeotrope_search": "azeotrope",
     "liquid_liquid_equilibrium": "lle",
     "lle": "lle",
+    "infinite_dilution_activity": "infinite_dilution_activity",
+    "infinite_dilution": "infinite_dilution_activity",
+    "gamma_infinity": "infinite_dilution_activity",
+    "gamma_inf": "infinite_dilution_activity",
+    "activity_coefficient_at_infinite_dilution": "infinite_dilution_activity",
 }
 
 
@@ -79,6 +85,7 @@ class ComponentIdentity(BaseModel):
     component_id: str
     name: str
     cas_number: str | None = None
+    smiles: str | None = None
     aliases: list[str] = Field(default_factory=list)
 
 
@@ -88,6 +95,10 @@ class ThermodynamicConditions(BaseModel):
     liquid_composition: list[float] | None = None
     vapor_composition: list[float] | None = None
     feed_composition: list[float] | None = None
+    #: Optional low/high temperature bounds for curve-style calculations such as
+    #: PGSSI gamma-infinity(T).  When set together with ``points`` the backend
+    #: sweeps a curve; when absent, ``temperature_K`` is a single point.
+    temperature_span_K: tuple[float, float] | None = None
 
     @model_validator(mode="after")
     def validate_compositions(self) -> ThermodynamicConditions:
@@ -99,6 +110,10 @@ class ThermodynamicConditions(BaseModel):
                 raise ValueError(f"{label} must contain mole fractions in [0, 1]")
             if abs(sum(values) - 1.0) > 1e-8:
                 raise ValueError(f"{label} must sum to one within 1e-8")
+        if self.temperature_span_K is not None:
+            lower, upper = self.temperature_span_K
+            if lower <= 0 or upper <= lower:
+                raise ValueError("temperature_span_K must contain positive ascending bounds")
         return self
 
 
@@ -230,6 +245,20 @@ class EquilibriumPoint(BaseModel):
     equilibrium_residual: float
 
 
+class GammaInfinityPoint(BaseModel):
+    """One infinite-dilution activity coefficient datum at a temperature.
+
+    ``solute_index``/``solvent_index`` refer to the task component order; the
+    coefficient is for the solute at infinite dilution in the solvent.
+    """
+
+    temperature_K: float
+    solute_index: int = Field(ge=0)
+    solvent_index: int = Field(ge=0)
+    gamma_infinity: float = Field(gt=0)
+    ln_gamma_infinity: float
+
+
 class PhaseResult(BaseModel):
     phase: Literal["liquid", "vapor"]
     fraction: float = Field(ge=0, le=1)
@@ -244,6 +273,7 @@ class CalculationResult(BaseModel):
     model_name: str
     parameter_set_id: str | None = None
     points: list[EquilibriumPoint] = Field(default_factory=list)
+    gamma_infinity: list[GammaInfinityPoint] = Field(default_factory=list)
     phases: list[PhaseResult] = Field(default_factory=list)
     temperature_K: float | None = None
     pressure_kPa: float | None = None

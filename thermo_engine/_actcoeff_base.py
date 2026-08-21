@@ -487,3 +487,10 @@ class ActCoeffBackend:
             f"{self.model_name} cannot represent liquid-liquid equilibrium.",
             "Use a validated LLE backend when available.",
         )
+
+    def infinite_dilution_activity(self, req: TaskManifest) -> CalculationResult:
+        raise ThermoEquiError(
+            FailureType.UNSUPPORTED_MODEL,
+            f"{self.model_name} VLE does not expose infinite-dilution activity coefficients.",
+            "Use the PGSSI backend for gamma-infinity predictions.",
+        )

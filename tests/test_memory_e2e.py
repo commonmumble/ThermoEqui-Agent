@@ -12,7 +12,7 @@ from pathlib import Path
 # Ensure project root is importable
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from agent.conversation_memory import ConversationMemory, MemoryRecord
+from agent.conversation_memory import ConversationMemory
 from agent.memory_integration import (
     build_calc_reference,
     build_context_prefix,

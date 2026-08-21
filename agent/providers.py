@@ -166,6 +166,31 @@ _NON_REQUEST_CALCULATION_PREFIX = re.compile(
     r"(?:计算|推算)(?:得到|得出|显示|表明|结果|可知|可见)"
 )
 
+#: Property keywords whose value can only come from a deterministic backend.
+_GAMMA_INFINITY_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "无限稀释",
+        "无限稀",
+        "γ∞",
+        "γinf",
+        "gamma infinity",
+        "gamma-infinity",
+        "gamma_inf",
+        "infinite dilution",
+    }
+)
+
+#: "how much is X" question forms that request a numeric value.
+_NUMERIC_QUESTION_WORDS: frozenset[str] = frozenset(
+    {
+        "是多少",
+        "多少",
+        "数值",
+        "值是多少",
+        "为多少",
+    }
+)
+
 
 def _is_thermo_question(question: str) -> bool:
     lower = question.casefold()
@@ -185,6 +210,8 @@ _MODEL_SUITABILITY_PATTERN = re.compile(
 
 def _is_calculation_question(question: str) -> bool:
     lower = question.casefold()
+    if any(kw.casefold() in lower for kw in _GAMMA_INFINITY_KEYWORDS):
+        return True
     if _JUDGMENT_QUESTION_PATTERN.search(lower):
         return False
     if _MODEL_SUITABILITY_PATTERN.search(lower) and ("吗" in lower or "呢" in lower or "?" in lower or "？" in lower):
@@ -194,6 +221,8 @@ def _is_calculation_question(question: str) -> bool:
     if _CALCULATION_REQUEST_PATTERN.search(question):
         if not _NON_REQUEST_CALCULATION_PREFIX.search(question):
             return True
+    if any(word in lower for word in _NUMERIC_QUESTION_WORDS) and _is_thermo_question(question):
+        return True
     return False
 
 
@@ -399,9 +428,7 @@ class ConstrainedLLMProvider:
         elif intent_label and intent_label.upper() in relaxed_intents:
             check_numbers = False
         else:
-            check_numbers = (
-                _is_thermo_question(message) and _is_calculation_question(message)
-            )
+            check_numbers = _is_thermo_question(message) and _is_calculation_question(message)
         if check_numbers:
             if _contains_ungrounded_claim(value, check_numbers=True, grounded_numbers=grounded_numbers):
                 return [EvidenceStatement(category="Warning", text=_WITHHELD_TEXT)]

@@ -9,6 +9,7 @@ import { exportUrl, rerunTask, sendChat } from "@/lib/api";
 import type { AgentStep, CalculationEnvelope, ChatResponse, TaskManifest } from "@/lib/types";
 import { AgentRuntime } from "./AgentRuntime";
 import { FlashResultCard } from "./FlashResultCard";
+import { GammaChart } from "./GammaChart";
 import { ScientificValidationCard } from "./ScientificValidationCard";
 import { VleChart } from "./VleChart";
 
@@ -253,7 +254,22 @@ export function Workbench() {
 
             <div className="results-stack">
               {calculation && <ScientificValidationCard calculation={calculation} />}
-              {calculation && !isFlashResult && (
+              {calculation && !isFlashResult && calculation.result.gamma_infinity.length > 0 && (
+                <section className="result-panel chart-panel">
+                  <div className="panel-heading">
+                    <h3>γ∞-T 曲线</h3>
+                    <span>{calculation.result.model_name}</span>
+                  </div>
+                  <GammaChart
+                    points={calculation.result.gamma_infinity}
+                    model={calculation.result.model_name}
+                    components={calculation.result.input_snapshot?.components as
+                      | { name?: string }[]
+                      | undefined}
+                  />
+                </section>
+              )}
+              {calculation && !isFlashResult && calculation.result.gamma_infinity.length === 0 && (
                 <section className="result-panel chart-panel">
                   <div className="panel-heading">
                     <h3>相平衡图</h3>
@@ -296,28 +312,59 @@ export function Workbench() {
                     <h3>数据表</h3>
                   </div>
                   <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>T / K</th>
-                          <th>P / kPa</th>
-                          <th>x1</th>
-                          <th>y1</th>
-                          <th>残差</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {calculation.result.points.map((point, index) => (
-                          <tr key={index}>
-                            <td>{point.temperature_K.toFixed(4)}</td>
-                            <td>{point.pressure_kPa.toFixed(3)}</td>
-                            <td>{point.liquid_composition[0].toFixed(5)}</td>
-                            <td>{point.vapor_composition[0].toFixed(5)}</td>
-                            <td>{point.equilibrium_residual.toExponential(2)}</td>
+                    {calculation.result.gamma_infinity.length > 0 ? (
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>T / K</th>
+                            <th>溶质 → 溶剂</th>
+                            <th>γ∞</th>
+                            <th>ln γ∞</th>
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {calculation.result.gamma_infinity.map((point, index) => {
+                            const components = calculation.result.input_snapshot?.components as
+                              | Array<{ name?: string }>
+                              | undefined;
+                            return (
+                              <tr key={index}>
+                                <td>{point.temperature_K.toFixed(2)}</td>
+                                <td>
+                                  {components?.[point.solute_index]?.name ?? point.solute_index} →{" "}
+                                  {components?.[point.solvent_index]?.name ?? point.solvent_index}
+                                </td>
+                                <td>{point.gamma_infinity.toFixed(4)}</td>
+                                <td>{point.ln_gamma_infinity.toFixed(4)}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    ) : (
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>T / K</th>
+                            <th>P / kPa</th>
+                            <th>x1</th>
+                            <th>y1</th>
+                            <th>残差</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {calculation.result.points.map((point, index) => (
+                            <tr key={index}>
+                              <td>{point.temperature_K.toFixed(4)}</td>
+                              <td>{point.pressure_kPa.toFixed(3)}</td>
+                              <td>{point.liquid_composition[0].toFixed(5)}</td>
+                              <td>{point.vapor_composition[0].toFixed(5)}</td>
+                              <td>{point.equilibrium_residual.toExponential(2)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
                   </div>
                 </section>
               )}
